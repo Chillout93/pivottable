@@ -3,17 +3,18 @@ import * as _ from "lodash";
 
 type AppState = {
     data2: Data[],
-    hiddenGroupings: string[]
+    columns: ActionProperty[]
 }
 
 const recursiveGroup = (rows: Data[], groupKeys: string[], groupKeyIndex: number, columns: ActionProperty[]): any[] => {
-    if (groupKeyIndex === groupKeys.length - 1) return rows;
+    if (groupKeyIndex === groupKeys.length) return null;
 
     return _.chain(rows).groupBy(groupKeys[groupKeyIndex]).map((groupedRows, groupKey) => {
         const row = {};
+        row["datas"] = recursiveGroup(groupedRows, groupKeys, groupKeyIndex + 1, columns);
+
         for (const prop of columns) {
-            row[prop.property] = aggregateSwitch(prop.action, groupedRows, prop.property, groupKeys[groupKeyIndex], groupKey);
-            row["datas"] = recursiveGroup(groupedRows, groupKeys, groupKeyIndex + 1, columns);
+            row[prop.property] = aggregateSwitch(row, prop.action, groupedRows, prop.property, groupKeys[groupKeyIndex], groupKey);
         }
         return row;
     }).value();
@@ -22,22 +23,13 @@ const recursiveGroup = (rows: Data[], groupKeys: string[], groupKeyIndex: number
 type ActionProperty = {
     property: string;
     action: ActionType;
+    editable: boolean;
+    editFunction?: Function;
 }
 
-const columns: ActionProperty[] = [
-    { property: "category", action: "GROUP" },
-    { property: "department", action: "GROUP" },
-    { property: "type", action: "GROUP" },
-    { property: "ref", action: "GROUP" },
-    { property: "colour", action: "GROUP" },
-    { property: "sno", action: "GROUP" },
-    { property: "week", action: "GROUP" },
-    { property: "value", action: "SUM" },
-];
+type ActionType = "GROUP" | "HIDE" | "SUM" | "DISTINCT" | "AVERAGE" | "COUNT" | "PROPERTY";
 
-type ActionType = "GROUP" | "HIDE" | "SUM" | "DISTINCT" | "AVERAGE" | "COUNT";
-
-const aggregateSwitch = (action: ActionType, rows: Data[], property: string, currentGroupingProperty: string, currentGroupingValue: string) => {
+const aggregateSwitch = (row: any, action: ActionType, rows: Data[], property: string, currentGroupingProperty: string, currentGroupingValue: string) => {
     switch (action) {
         case "SUM":
             return _.sumBy(rows, x => x[property]);
@@ -49,17 +41,55 @@ const aggregateSwitch = (action: ActionType, rows: Data[], property: string, cur
             return currentGroupingProperty === property ? currentGroupingValue : null;
         case "HIDE":
             return null;
+        case "PROPERTY":
+            return !row.datas || row.datas.length === 0 ? parseInt(rows[0][property]) : null;
     }
+}
+
+const findLowestData = (rows: Data[]): Data[] => {
+    const rowsToReturn = [];
+    for (const row of rows) {
+        if (!row.datas || row.datas.length === 0)
+            rowsToReturn.push(row);
+        else
+            rowsToReturn.concat(findLowestData(rows));
+    }
+
+    return rowsToReturn;
 }
 
 export default class App extends React.Component<{}, AppState> {
     state = {
         data2: data,
-        hiddenGroupings: []
+        columns: [
+            { property: "id", action: "PROPERTY", editable: false },
+            { property: "category", action: "GROUP", editable: false },
+            { property: "department", action: "GROUP", editable: false },
+            { property: "type", action: "GROUP", editable: false },
+            { property: "ref", action: "GROUP", editable: false },
+            { property: "colour", action: "GROUP", editable: false },
+            { property: "week", action: "GROUP", editable: false },
+            { property: "sno", action: "GROUP", editable: false },
+            {
+                property: "value", action: "SUM", editable: true, editFunction: (e, oldRow) => {
+                    const oldValue = oldRow.value;
+                    const newValue = Math.round(parseInt(e.currentTarget.innerText));
+
+                    const rowsToUpdate = !oldRow.datas || oldRow.datas.length === 0 ? [oldRow] : findLowestData(oldRow);
+                    for (let row of rowsToUpdate) {
+                        row.value = Math.round((row.value / oldValue) * newValue);
+                    }
+
+                    console.log("rowsToUpdate: ", rowsToUpdate);
+                    this.updateValue(rowsToUpdate);
+                }
+            },
+        ] as ActionProperty[]
     }
 
     render() {
-        const { data2, hiddenGroupings } = this.state;
+        const { data2, columns } = this.state;
+        console.log(data2.filter(x => x.id === 1));
 
         // Can decide which columns to group by and the order
         // Then decide which columns to aggregate by, and how
@@ -68,20 +98,14 @@ export default class App extends React.Component<{}, AppState> {
         return (
             <React.Fragment>
                 <div className="container-fluid">
-                    {nestedTable("category", groupedRows, this.updateValue, data2, this.toggleRow, hiddenGroupings, columns)}
+                    {nestedTable("category", groupedRows, this.updateValue, data2, this.toggleRow, columns)}
                 </div>
             </React.Fragment>
         )
     }
 
     toggleRow = (groupingKey: string) => {
-        let rows = [...this.state.hiddenGroupings];
-        if (rows.some(x => x === groupingKey))
-            rows.splice(rows.indexOf(groupingKey), 1);
-        else
-            rows.push(groupingKey);
 
-        this.setState({ hiddenGroupings: rows });
     }
 
     updateValue = (data: Data[]) => {
@@ -96,9 +120,9 @@ export default class App extends React.Component<{}, AppState> {
     }
 }
 
-const nestedRow = (groupingKey: string, rows: Data[], updateValue: Function, allRows: Data[], toggleRow: Function, hiddenGroups: string[], columns: ActionProperty[]) =>
+const nestedRow = (groupingKey: string, rows: Data[], updateValue: Function, allRows: Data[], toggleRow: Function, columns: ActionProperty[]) =>
     rows.map(x => <React.Fragment><tr key={x.id} style={{ backgroundColor: x.datas ? "lightgrey" : "white" }}>
-        {columns.map(y => <td onClick={() => toggleRow(groupingKey)}>{x[y.property]}</td>)}
+        {columns.map(y => <td contentEditable={y.editable} onBlur={(e) => y.editFunction(e, x)} onClick={() => toggleRow(groupingKey)}>{x[y.property]}</td>)}
         {/* 
         <td suppressContentEditableWarning={true} contentEditable={true} onBlur={(e) => {
             const oldValue = x.value;
@@ -117,11 +141,11 @@ const nestedRow = (groupingKey: string, rows: Data[], updateValue: Function, all
             }
         }}>{Math.round(x.value)}</td> */}
     </tr>
-        {x.datas && !hiddenGroups.some(y => y === groupingKey) && nestedRow(groupingKey, x.datas, updateValue, allRows, toggleRow, hiddenGroups, columns)}
+        {x.datas && nestedRow(groupingKey, x.datas, updateValue, allRows, toggleRow, columns)}
     </React.Fragment>
     );
 
-const nestedTable = (grouping: string, rows: Data[], updateValue: Function, allRows: Data[], toggleRow: Function, hiddenGroupings: string[], columns: ActionProperty[]) =>
+const nestedTable = (grouping: string, rows: Data[], updateValue: Function, allRows: Data[], toggleRow: Function, columns: ActionProperty[]) =>
     <table className="table table-sm collapse show">
         <thead>
             <tr>
@@ -129,7 +153,7 @@ const nestedTable = (grouping: string, rows: Data[], updateValue: Function, allR
             </tr>
         </thead>
         <tbody>
-            {nestedRow(grouping, rows, updateValue, allRows, toggleRow, hiddenGroupings, columns)}
+            {nestedRow(grouping, rows, updateValue, allRows, toggleRow, columns)}
         </tbody>
     </table>
 
